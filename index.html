@@ -17,7 +17,7 @@ try{token=localStorage.getItem('othman-edit-token')||'';savedName=localStorage.g
 if(!/^[a-f0-9]{64}$/.test(token)){token=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');try{localStorage.setItem('othman-edit-token',token)}catch{storageOK=false}}
 function setStatus(text,error=false){$('#status').className=text?'status'+(error?' error':''):'';$('#status').textContent=text}
 async function api(path,data){const res=await fetch(API_BASE+path,{method:data?'POST':'GET',headers:{'X-Edit-Token':token,...(data?{'Content-Type':'application/json'}:{})},body:data?JSON.stringify(data):undefined,cache:'no-store',signal:AbortSignal.timeout(20000)});let result;try{result=await res.json()}catch{throw new Error('サーバーに接続できません。再読込してください。')}if(!res.ok)throw new Error(result.error||'処理に失敗しました');return result}
-async function load(){const current=++requestId;loading=true;setStatus('読み込み中…');try{const result=await api('/api/board?week='+iso(week));if(current!==requestId)return;slots=result.slots;setStatus(slots.length?'':'この週の募集はありません。');render()}catch(e){if(current===requestId){slots=[];render();setStatus(e.message||'接続できません。再読込してください。',true)}}finally{if(current===requestId)loading=false}}
+async function load(){if(busy)return;const current=++requestId;loading=true;setStatus('読み込み中…');try{const result=await api('/api/board?week='+iso(week));if(current!==requestId)return;slots=result.slots;setStatus(slots.length?'':'この週の募集はありません。');render()}catch(e){if(current===requestId){slots=[];render();setStatus(e.message||'接続できません。再読込してください。',true)}}finally{if(current===requestId)loading=false}}
 function render(){const dates=Array.from({length:7},(_,i)=>at(week,i)),begin=Math.min(10,...slots.map(s=>Math.floor(s.start))),finish=Math.max(24,...slots.map(s=>Math.ceil(s.end))),hours=finish-begin;
  const timeline=$('#timeScroll'),targetHour=renderedWeek===iso(week)?renderedBegin+timeline.scrollTop/60:15;
  $('#weekTitle').textContent=week.toLocaleDateString('ja-JP',{timeZone:'Asia/Tokyo',year:'numeric',month:'numeric',day:'numeric'})+' – '+at(week,6).toLocaleDateString('ja-JP',{timeZone:'Asia/Tokyo',month:'numeric',day:'numeric'});
@@ -48,10 +48,37 @@ function detail(){const s=slots.find(s=>s.id===selected);if(!s)return;const mine
  if(answerSummary)answerSummary.after(historySection);else $('#detail').insertBefore(historySection,$('#delete'));
  if($('#saveAnswer'))$('#saveAnswer').onclick=async()=>{const name=$('#respondent').value.trim();if(!name){$('#saveState').textContent='名前を入力してください';$('#saveState').className='save-state error';$('#respondent').focus();return}await mutate('/api/answer',{slot:s.id,name,availability:draft},false,name)};
 }
-async function mutate(path,data,close=false,name){if(busy)return;busy=true;const field=$('#saveState');if(field){field.className='save-state';field.textContent='保存中…'}const disabledBefore=new Map(Array.from($('#detail').querySelectorAll('button,select,input'),x=>[x,x.disabled]));disabledBefore.forEach((_,x)=>x.disabled=true);try{await api(path,data);if(name){savedName=name;try{localStorage.setItem('othman-name',name)}catch{}}if(close)$('#detailDialog').close();await load();if($('#saveState'))$('#saveState').textContent='保存しました'}catch(e){if($('#saveState')){$('#saveState').textContent=e.message||'保存できませんでした';$('#saveState').className='save-state error'}disabledBefore.forEach((disabled,x)=>x.disabled=disabled)}finally{busy=false}}
+function applySaved(result){
+ ++requestId;loading=false;
+ if(result.deleted){slots=slots.filter(s=>s.id!==result.deleted);render()}
+ else if(result.slot){
+  const updated=result.slot,index=slots.findIndex(s=>s.id===updated.id);
+  if(index>=0)slots[index]=updated;else if(updated.date>=iso(week)&&updated.date<=iso(at(week,6)))slots.push(updated);
+  const event=Array.from($('#grid').querySelectorAll('[data-id]')).find(b=>b.dataset.id===updated.id);
+  if(event){
+   const fully=hourFixed(updated)===updated.periods.length;
+   event.classList.toggle('fixed',fully);event.setAttribute('aria-label',jdate(updated.date)+' '+fmt(updated.start)+'から'+fmt(updated.end)+' '+slotStatus(updated));
+   const label=event.querySelector('.event-status');if(label)label.textContent=fully?'確定':hourFixed(updated)?'一部確定':updated.answers.filter(a=>a.available===1).length+'名 ○';
+   if($('#detailDialog').open&&selected===updated.id){const scroll=$('#detailDialog').scrollTop;detail();$('#detailDialog').scrollTop=scroll}
+  }else render();
+ }
+ setStatus(slots.length?'':'この週の募集はありません。');
+}
+async function mutate(path,data,close=false,name){
+ if(busy)return;busy=true;++requestId;loading=false;
+ const field=$('#saveState');if(field){field.className='save-state';field.textContent='保存中…'}
+ const disabledBefore=new Map(Array.from($('#detail').querySelectorAll('button,select,input'),x=>[x,x.disabled]));disabledBefore.forEach((_,x)=>x.disabled=true);
+ try{
+  const result=await api(path,data);
+  if(name){savedName=result.slot?.answers.find(a=>a.mine)?.name||name;try{localStorage.setItem('othman-name',savedName)}catch{}}
+  if(close)$('#detailDialog').close();
+  applySaved(result);
+  if($('#saveState')){$('#saveState').className='save-state';$('#saveState').textContent='保存しました'}
+ }catch(e){if($('#saveState')){$('#saveState').textContent=e.message||'保存できませんでした';$('#saveState').className='save-state error'}disabledBefore.forEach((disabled,x)=>x.disabled=disabled)}finally{busy=false}
+}
 function openCreate(){$('#date').value=iso(week);$('#start').value=14;$('#end').value=16;$('#formError').textContent='';$('#createDialog').showModal()}
 for(let h=0;h<=24;h+=.5){if(h<24)$('#start').add(new Option(fmt(h),h));if(h>0)$('#end').add(new Option(fmt(h),h))}
-$('#createForm').onsubmit=async e=>{e.preventDefault();if(busy)return;const date=$('#date').value,start=Number($('#start').value),end=Number($('#end').value);if(end<=start){$('#formError').textContent='終了時刻は開始より後にしてください';return}busy=true;const submit=$('#createForm button[type=submit]');submit.disabled=true;$('#formError').textContent='保存中…';try{await api('/api/admin/slot',{date,start,end});week=startOfWeek(new Date(date+'T00:00:00+09:00'));$('#createDialog').close();await load()}catch(e){$('#formError').textContent=e.message||'保存できませんでした'}finally{busy=false;submit.disabled=false}};
+$('#createForm').onsubmit=async e=>{e.preventDefault();if(busy)return;const date=$('#date').value,start=Number($('#start').value),end=Number($('#end').value);if(end<=start){$('#formError').textContent='終了時刻は開始より後にしてください';return}busy=true;const submit=$('#createForm button[type=submit]');submit.disabled=true;$('#formError').textContent='保存中…';try{const result=await api('/api/admin/slot',{date,start,end});const nextWeek=startOfWeek(new Date(date+'T00:00:00+09:00'));const changedWeek=iso(nextWeek)!==iso(week);if(changedWeek){week=nextWeek;slots=[]}$('#createDialog').close();applySaved(result);if(changedWeek){busy=false;load()}}catch(e){$('#formError').textContent=e.message||'保存できませんでした'}finally{busy=false;submit.disabled=false}};
 $('#roleLabel').textContent=ADMIN?'管理者':'参加登録';$('#add').classList.toggle('hidden',!ADMIN);$('#add').onclick=openCreate;$('#refresh').onclick=()=>load();$('#prev').onclick=()=>{week=at(week,-7);selected=null;load()};$('#next').onclick=()=>{week=at(week,7);selected=null;load()};$('#today').onclick=()=>{week=startOfWeek(new Date(iso(new Date())+'T00:00:00+09:00'));selected=null;load()};
 $('#weekStart').value=String(weekStart);
 $('#weekStart').onchange=()=>{
